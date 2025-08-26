@@ -160,6 +160,7 @@ cover_bb_num = "donotrecord"
 
 For other keywords in the config file, please check the documents in Syzkaller.
 [Configuration in Syzkaller](https://github.com/google/syzkaller/blob/master/docs/configuration.md)
+
 💡 Tip: If system resources are limited (e.g., CPU cores or memory), reducing 'procs' and 'vm'  will help lower CPU and memory usage during fuzzing.
 
 ### Start Sysyphuzz
