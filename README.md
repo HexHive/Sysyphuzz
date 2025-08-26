@@ -38,7 +38,7 @@ Once executed, Sysyphuzz is ready for use.
 
 ## How to Use SYSYPHUZZ
 
-SYSYPHUZZ is used in the same way as SYZKALLER, and is controlled by adding configuration options in the configuration file.
+SYSYPHUZZ is used in the same way as Syzkaller, and is controlled by adding configuration options in the configuration file.
 
 After running the deployment script,
 two configuration files will be automatically generated and placed under:
