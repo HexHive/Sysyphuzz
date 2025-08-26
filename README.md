@@ -20,5 +20,118 @@ Sysyphuzz/
 |  |--create-image.sh                                     # create-image.sh creates a minimal Debian Linux image suitable for syzkaller.
 |  |--ci-qemu-upstream-corpus.db                          # A Syzbot corpus captured on November 13, 2024.
 |  |--deploy.sh                                           # Run the deploy.sh script with sudo privileges. This script creates a new user fuzz and sets up the environment.
+|  |--scripts
+|  |  |--atifact_valuation.pdf                            # We provide this appendix to support artifact evaluation and facilitate smooth reproduction of our results.
+|  |  |--...py                                            # Scripts for generating data used in the paper.
+```
 
+## How To Build SYSYPHUZZ
+
+SYSYPHUZZ is based on Syzkaller, SYSYPHUZZ does not require additional dependencies.
+### Clone this Repo
+### Build 
+Run the deploy.sh script with sudo privileges.
+This script creates a new user fuzz and sets up the environment. 
+You can modify the default password in the shell file if needed. 
+
+Once executed, Sysyphuzz is ready for use.
+
+## How to Use SYSYPHUZZ
+
+SYSYPHUZZ is used in the same way as SYZKALLER, and is controlled by adding configuration options in the configuration file.
+
+After running the deployment script,
+two configuration files will be automatically generated and placed under:
+```bash
+/home/fuzz/code/sysyphuzz/
+```
+
+These are:
+```bash
+sysyphuzz.cfg – The main configuration file for running the Sysyphuzz system.
+
+syzkaller.cfg – The baseline configuration used to run the vanilla Syzkaller fuzzer for comparison purposes.
+```
+
+These files are pre-populated with default settings but can be further customized.
+
+### sysyphuzz.cfg
+```bash
+{
+    "target": "linux/amd64",
+    "http": "127.0.0.1:56743",
+    "workdir": "/home/fuzz/code/sysyphuzz/workdir_sysy",
+    "kernel_src": "/home/fuzz/kernel/linux",
+    "kernel_obj": "/home/fuzz/kernel/linux-out",
+    "raw_cover": true,
+    "warm_up": true,
+    "boost_only": false,
+    "cover_bb_num" : "sysyphuzz_bb",
+    "reproduce": false,
+    "image": "/home/fuzz/Image/imag1/bullseye.img",
+    "sshkey": "/home/fuzz/Image/imag1/bullseye.id_rsa",
+    "syzkaller": "/home/fuzz/code/sysyphuzz",
+    "procs": 4,
+    "type": "qemu",
+    "vm": {
+        "count": 8,
+        "cpu": 2,
+        "mem": 4096,
+        "kernel": "/home/fuzz/kernel/linux-out/arch/x86/boot/bzImage"
+    }
+}
+```
+
+In addition to the standard Syzkaller configuration options, Sysyphuzz introduces several new keywords in sysyphuzz.cfg to support advanced features:
+
+|Keyword | Type | Description|
+|---|---|---|
+|warm_up | bool | Enables the warm-up stage to prioritize under-covered basic blocks (BBs).
+|boost_only	| bool | Runs only the boosting phase, skipping all coverage feedback, this is a expert mode used for subsequent development, keep false here.
+|cover_bb_num | string | Path to the directory tracking the number of times each BB has been covered.
+
+All other configuration fields remain compatible with Syzkaller, making migration or extension straightforward.
+
+Example: Enabling Warm-Up and Hit Count Logging
+```bash
+warm_up = true                             # Enables Sysyphuzz's warm-up mode to focus on under-covered BBs.
+cover_bb_num = "./cover_bb_num_dir"        # Directory to store all log files tracking BB hit counts.
+```
+
+If the user does not wish to track hit counts (e.g., to save disk space), simply disable logging by setting:
+```bash
+cover_bb_num = "donotrecord"
+```
+
+💡 Note: Disabling hit count tracking can significantly reduce disk usage, which is useful when running on low-resource environments.
+
+Example:
+```bash
+warm_up = true                                 # Fuzzer running as SYSYPHUZZ.
+cover_bb_num = "./cover_bb_num_dir"            # All log files for hit count record will go into this folder.
+```
+Running in Syzkaller-Compatible Mode
+
+By setting:
+```bash
+warm_up = false
+```
+
+Sysyphuzz will run in the default Syzkaller-compatible mode, without enabling any warm-up or boosting logic.
+
+In this mode, the fuzzer behaves exactly like Syzkaller in terms of test execution and scheduling.
+It will still record hit count information in parallel.
+However, only observes coverage data passively and does not interfere with the fuzzing logic, maintaining compatibility with Syzkaller's original operation.
+
+This is useful for:
+
+* Baseline comparisons with hitcount-aware data.
+
+* Enable the fuzzer to switch rapidly between the Syzkaller logic and the Sysyphuzz logic.
+
+💡 Tip: To completely disable hit count logging and save memory/disk resources, use:
+
+```bash
+cover_bb_num = "donotrecord"
+```
 
