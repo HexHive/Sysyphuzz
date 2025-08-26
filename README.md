@@ -63,7 +63,7 @@ These files are pre-populated with default settings but can be further customize
     "http": "127.0.0.1:56743",
     "workdir": "/home/fuzz/code/sysyphuzz/workdir_sysy",
     "kernel_src": "/home/fuzz/kernel/linux",
-    "kernel_obj": "/home/fuzz/kernel/linux-out",
+    "dddkernel_obj": "/home/fuzz/kernel/linux-out",
     "raw_cover": true,
     "warm_up": true,
     "boost_only": false,
@@ -160,6 +160,7 @@ cover_bb_num = "donotrecord"
 
 For other keywords in the config file, please check the documents in Syzkaller.
 [Configuration in Syzkaller](https://github.com/google/syzkaller/blob/master/docs/configuration.md)
+💡 Tip: If system resources are limited (e.g., CPU cores or memory), reducing 'procs' and 'vm'  will help lower CPU and memory usage during fuzzing.
 
 ### Start Sysyphuzz
 ```bash
@@ -173,3 +174,13 @@ sudo bin/syz-manager \
 | tee ./workdir_sysy/"$(date +"%Y_%m_%d").log"
 # Useing "ctrl + c" to stop.
 ```
+
+## Artifact Evaluation
+
+### For Reviewers during the major revision
+	Follow the guidence in the source_code/scripts/atifact_valuation.pdf
+### For Final Version
+    🚧 Coming Soon:
+	We are preparing automated scripts to further simplify deployment, execution, and evaluation of Sysyphuzz.
+
+	Stay tuned!
