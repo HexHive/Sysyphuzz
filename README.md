@@ -4,3 +4,14 @@
 Kernel fuzzing effectively uncovers vulnerabilities. While existing kernel fuzzers primarily focus on maximizing code coverage, coverage alone does not guarantee thorough exploration. Moreover, existing fuzzers, aimed at maximizing coverage, have plateaued. This pressing situation highlights the need for a new direction: code frequency-oriented kernel fuzzing. However, increasing the exploration of low-frequency kernel code faces two key challenges: (1) Resource constraints make it hard to schedule sufficient tasks for low-frequency regions without causing task explosion. (2) Random mutations often break context dependencies of syscalls targeting low-frequency regions, reducing the effectiveness of fuzzing.
 
 In our paper, we first perform a fine-grained study of imbalanced code coverage by evaluating Syzkaller in the Linux kernel and, as a response, propose SYSYPHUZZ, a kernel fuzzer designed to boost exploration of under-tested code regions. SYSYPHUZZ introduces Selective Task Scheduling to dynamically prioritize and manage exploration tasks, avoiding task explosion. It also employs Context-Preserving Mutation strategy to reduce the risk of disrupting important execution contexts.
+
+## Citation
+```bash
+🚀 Coming Soon at NDSS 2026.
+```
+
+## Repo Structure
+```bash
+Sysyphuzz/
+|--
+```

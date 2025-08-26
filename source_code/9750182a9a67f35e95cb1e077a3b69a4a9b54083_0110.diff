@@ -1,0 +1,1086 @@
+diff --git a/pkg/fuzzer/fuzzer.go b/pkg/fuzzer/fuzzer.go
+index c5f5526ea..66d0c556c 100644
+--- a/pkg/fuzzer/fuzzer.go
++++ b/pkg/fuzzer/fuzzer.go
+@@ -18,12 +18,15 @@ import (
+ 	"github.com/google/syzkaller/pkg/signal"
+ 	"github.com/google/syzkaller/pkg/stat"
+ 	"github.com/google/syzkaller/prog"
++	"github.com/google/syzkaller/pkg/log"
+ )
+ 
+ type Fuzzer struct {
+ 	Stats
+ 	Config *Config
+ 	Cover  *Cover
++	WarmupInst *Warmup
++	BeginWarmUp bool
+ 
+ 	ctx          context.Context
+ 	mu           sync.Mutex
+@@ -51,6 +54,8 @@ func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,
+ 		Stats:  newStats(),
+ 		Config: cfg,
+ 		Cover:  newCover(),
++		WarmupInst: newWarmup(),
++		BeginWarmUp: false,
+ 
+ 		ctx:         ctx,
+ 		rnd:         rnd,
+@@ -128,13 +133,45 @@ func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags
+ 	// it may result it concurrent modification of req.Prog.
+ 	// If we are already triaging this exact prog, this is flaky coverage.
+ 	var triage map[int]*triageCall
++	var warmupCalls map[int]*warmupCall
+ 	if req.ExecOpts.ExecFlags&flatrpc.ExecFlagCollectSignal > 0 && res.Info != nil && !inTriage {
++		//log.Logf(0, "Do we need warmup: %v", fuzzer.BeginWarmUp)
+ 		for call, info := range res.Info.Calls {
++			//log.Logf(0, "The covered bb number for this request is: %d", len(info.Cover))
++			//log.Logf(0, "The covered signal for this request is: %d", len(info.Signal))
+ 			fuzzer.triageProgCall(req.Prog, info, call, &triage)
++			if fuzzer.BeginWarmUp == true{
++				if req.IsWarmUp{
++					log.Logf(0, "warmup candidate execution result.")
++					fuzzer.WarmupInst.CheckPerCall(info, call, &warmupCalls)
++				}
++			}
+ 		}
+ 		fuzzer.triageProgCall(req.Prog, res.Info.Extra, -1, &triage)
+-
++		if fuzzer.BeginWarmUp == true && req.IsWarmUp{
++			fuzzer.WarmupInst.CheckPerCall(res.Info.Extra, -1, &warmupCalls)
++			if len(warmupCalls) != 0 {
++				log.Logf(0, "Boost candidate covered the undercovered BBs. Related syscalls number is %d", len(warmupCalls))
++				stat := fuzzer.statJobsWarmup
++				//StartwarmupJob: triage, minimize, and 
++				job := &warmupJob{
++					p: req.Prog.Clone(),
++					calls: warmupCalls,
++					info: &JobInfo{
++						Name: req.Prog.String(),
++						Type: "warmup",
++					},
++				}
++				for id := range warmupCalls{
++					job.info.Calls = append(job.info.Calls, job.p.CallName(id))
++				}
++				sort.Strings(job.info.Calls)
++				log.Logf(0, "start warmup job!")
++				fuzzer.startJob(stat, job)
++			}
++		}
+ 		if len(triage) != 0 {
++			//log.Logf(0, "Found new coverage call number:%d.", len(triage))
+ 			queue, stat := fuzzer.triageQueue, fuzzer.statJobsTriage
+ 			if flags&progCandidate > 0 {
+ 				queue, stat = fuzzer.triageCandidateQueue, fuzzer.statJobsTriageCandidate
+@@ -172,7 +209,7 @@ func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags
+ 			maxCandidateAttempts = 0
+ 		}
+ 	}
+-	if len(triage) == 0 && flags&ProgFromCorpus != 0 && attempt < maxCandidateAttempts {
++	if len(triage) == 0 && flags&ProgFromCorpus != 0 && attempt < maxCandidateAttempts && fuzzer.BeginWarmUp == false{
+ 		fuzzer.enqueue(fuzzer.candidateQueue, req, flags, attempt+1)
+ 		return false
+ 	}
+@@ -195,6 +232,7 @@ type Config struct {
+ 	NoMutateCalls  map[int]bool
+ 	FetchRawCover  bool
+ 	NewInputFilter func(call string) bool
++	BoostOnly      bool
+ }
+ 
+ func (fuzzer *Fuzzer) triageProgCall(p *prog.Prog, info *flatrpc.CallInfo, call int, triage *map[int]*triageCall) {
+@@ -307,6 +345,7 @@ const (
+ 	ProgFromCorpus ProgFlags = 1 << iota
+ 	ProgMinimized
+ 	ProgSmashed
++	ProgWarmUp
+ 
+ 	progCandidate
+ 	progInTriage
+@@ -322,10 +361,13 @@ func (fuzzer *Fuzzer) AddCandidates(candidates []Candidate) {
+ 	for _, candidate := range candidates {
+ 		req := &queue.Request{
+ 			Prog:      candidate.Prog,
+-			ExecOpts:  setFlags(flatrpc.ExecFlagCollectSignal),
++			ExecOpts:  setFlags(flatrpc.ExecFlagCollectCover | flatrpc.ExecFlagCollectSignal),
+ 			Stat:      fuzzer.statExecCandidate,
+ 			Important: true,
+ 		}
++		if candidate.Flags&ProgWarmUp != 0{
++			req.IsWarmUp = true
++		}
+ 		fuzzer.enqueue(fuzzer.candidateQueue, req, candidate.Flags|progCandidate, 0)
+ 	}
+ }
+@@ -413,3 +455,11 @@ func setFlags(execFlags flatrpc.ExecFlag) flatrpc.ExecOpts {
+ 		ExecFlags: execFlags,
+ 	}
+ }
++
++func (fuzzer *Fuzzer) GetSmashQueueLength() int{
++	return fuzzer.smashQueue.Len()
++}
++
++func (fuzzer *Fuzzer) BoostJobNum() int{
++	return fuzzer.statJobsBoostSmash.Val() + fuzzer.statJobsBoostHints.Val() + fuzzer.statJobsBoostFaultInjection.Val()
++}
+diff --git a/pkg/fuzzer/job.go b/pkg/fuzzer/job.go
+index d1bac5054..8b4220ef3 100644
+--- a/pkg/fuzzer/job.go
++++ b/pkg/fuzzer/job.go
+@@ -18,6 +18,8 @@ import (
+ 	"github.com/google/syzkaller/pkg/fuzzer/queue"
+ 	"github.com/google/syzkaller/pkg/signal"
+ 	"github.com/google/syzkaller/prog"
++	"github.com/google/syzkaller/pkg/log"
++	"github.com/google/syzkaller/pkg/stat"
+ )
+ 
+ type job interface {
+@@ -33,6 +35,7 @@ type JobInfo struct {
+ 	Calls []string
+ 	Type  string
+ 	Execs atomic.Int32
++	BlToWarmup bool
+ 
+ 	syncBuffer
+ }
+@@ -47,7 +50,7 @@ func genProgRequest(fuzzer *Fuzzer, rnd *rand.Rand) *queue.Request {
+ 		fuzzer.ChoiceTable())
+ 	return &queue.Request{
+ 		Prog:     p,
+-		ExecOpts: setFlags(flatrpc.ExecFlagCollectSignal),
++		ExecOpts: setFlags(flatrpc.ExecFlagCollectCover | flatrpc.ExecFlagCollectSignal),
+ 		Stat:     fuzzer.statExecGenerate,
+ 	}
+ }
+@@ -66,7 +69,7 @@ func mutateProgRequest(fuzzer *Fuzzer, rnd *rand.Rand) *queue.Request {
+ 	)
+ 	return &queue.Request{
+ 		Prog:     newP,
+-		ExecOpts: setFlags(flatrpc.ExecFlagCollectSignal),
++		ExecOpts: setFlags(flatrpc.ExecFlagCollectCover | flatrpc.ExecFlagCollectSignal),
+ 		Stat:     fuzzer.statExecFuzz,
+ 	}
+ }
+@@ -112,7 +115,7 @@ type triageCall struct {
+ // and finish it sooner. If the program does not produce any stable signal any more, just flakes,
+ // (if the kernel code was changed, or configs disabled), then it still should be phased out
+ // of the corpus eventually.
+-// Second, even if small percent of programs are dropped from the corpus due to flaky signal,
++// Second, even if small percent of candidateQueuere dropped from the corpus due to flaky signal,
+ // later after several restarts we will add them to the corpus again, and it will create lots
+ // of duplicate work for minimization/hints/smash/fault injection. For example, a program with
+ // 60% flakiness has 68% chance to pass 3/5 criteria, but it's also likely to be dropped from
+@@ -178,7 +181,7 @@ func (job *triageJob) handleCall(call int, info *triageCall) {
+ 	if !job.fuzzer.Config.NewInputFilter(callName) {
+ 		return
+ 	}
+-	if job.flags&ProgSmashed == 0 {
++	if job.flags&ProgSmashed == 0 && job.fuzzer.Config.BoostOnly == false{
+ 		job.fuzzer.startJob(job.fuzzer.statJobsSmash, &smashJob{
+ 			exec: job.fuzzer.smashQueue,
+ 			p:    p.Clone(),
+@@ -438,6 +441,7 @@ func (job *triageJob) getInfo() *JobInfo {
+ type smashJob struct {
+ 	exec queue.Executor
+ 	p    *prog.Prog
++	call int
+ 	info *JobInfo
+ }
+ 
+@@ -445,24 +449,41 @@ func (job *smashJob) run(fuzzer *Fuzzer) {
+ 	fuzzer.Logf(2, "smashing the program %s:", job.p)
+ 	job.info.Logf("\n%s", job.p.Serialize())
+ 
++	var stat *stat.Val
++	var unmutsyscalls map[int]bool
++	if job.info.BlToWarmup{
++		//log.Logf(0, "Request for warmup smash.")
++		stat = fuzzer.statExecWarmSmash
++		unmutsyscalls = make(map[int]bool)
++		for idx := 0; idx <= job.call; idx++{
++			unmutsyscalls[job.p.Calls[idx].Meta.ID] = true
++		}
++	} else {
++		stat = fuzzer.statExecSmash
++		unmutsyscalls = fuzzer.Config.NoMutateCalls
++	}
+ 	const iters = 25
+ 	rnd := fuzzer.rand()
+ 	for i := 0; i < iters; i++ {
+ 		p := job.p.Clone()
+ 		p.Mutate(rnd, prog.RecommendedCalls,
+ 			fuzzer.ChoiceTable(),
+-			fuzzer.Config.NoMutateCalls,
++			//fuzzer.Config.NoMutateCalls,
++			unmutsyscalls,
+ 			fuzzer.Config.Corpus.Programs())
+ 		result := fuzzer.execute(job.exec, &queue.Request{
+ 			Prog:     p,
+-			ExecOpts: setFlags(flatrpc.ExecFlagCollectSignal),
+-			Stat:     fuzzer.statExecSmash,
++			ExecOpts: setFlags(flatrpc.ExecFlagCollectCover | flatrpc.ExecFlagCollectSignal),
++			Stat:     stat,
+ 		})
+ 		if result.Stop() {
+ 			return
+ 		}
+ 		job.info.Execs.Add(1)
+ 	}
++	//if job.info.BlToWarmup{
++	//	log.Logf(0, "Warmup smash finished.")
++	//}
+ }
+ 
+ func (job *smashJob) getInfo() *JobInfo {
+@@ -495,6 +516,7 @@ type faultInjectionJob struct {
+ 	exec queue.Executor
+ 	p    *prog.Prog
+ 	call int
++	BlToWarmup bool
+ }
+ 
+ func (job *faultInjectionJob) run(fuzzer *Fuzzer) {
+@@ -503,10 +525,20 @@ func (job *faultInjectionJob) run(fuzzer *Fuzzer) {
+ 			job.call, nth)
+ 		newProg := job.p.Clone()
+ 		newProg.Calls[job.call].Props.FailNth = nth
++		var stat *stat.Val
++		if job.BlToWarmup{
++			//log.Logf(0, "Request for warmup faultInject.")
++			stat = fuzzer.statExecWarmFaultInject
++		}else{
++			stat = fuzzer.statExecFaultInject
++		}
+ 		result := fuzzer.execute(job.exec, &queue.Request{
+ 			Prog: newProg,
+-			Stat: fuzzer.statExecFaultInject,
++			Stat: stat,
+ 		})
++		if job.BlToWarmup{
++			//log.Logf(0, "Warmup faultInjection finished.")
++		}
+ 		if result.Stop() {
+ 			return
+ 		}
+@@ -563,14 +595,24 @@ func (job *hintsJob) run(fuzzer *Fuzzer) {
+ 	// Then mutate the initial program for every match between
+ 	// a syscall argument and a comparison operand.
+ 	// Execute each of such mutants to check if it gives new coverage.
++	var stat *stat.Val
++	if job.info.BlToWarmup{
++		//log.Logf(0, "Request for warmup hint.")
++		stat = fuzzer.statExecWarmHint
++	}else{
++		stat = fuzzer.statExecHint
++	}
+ 	p.MutateWithHints(job.call, comps,
+ 		func(p *prog.Prog) bool {
+ 			defer job.info.Execs.Add(1)
+ 			result := fuzzer.execute(job.exec, &queue.Request{
+ 				Prog:     p,
+-				ExecOpts: setFlags(flatrpc.ExecFlagCollectSignal),
+-				Stat:     fuzzer.statExecHint,
++				ExecOpts: setFlags(flatrpc.ExecFlagCollectCover | flatrpc.ExecFlagCollectSignal),
++				Stat:     stat,
+ 			})
++		//	if job.info.BlToWarmup{
++		//		log.Logf(0, "Warmup hint finished.")
++		//	}
+ 			return !result.Stop()
+ 		})
+ }
+@@ -598,3 +640,66 @@ func (sb *syncBuffer) Bytes() []byte {
+ 	defer sb.mu.Unlock()
+ 	return sb.buf.Bytes()
+ }
++
++// warmupJob used to start hint job and faultInjection job
++type warmupJob struct{
++	p *prog.Prog
++	fuzzer *Fuzzer
++	calls map[int]*warmupCall
++	info *JobInfo
++}
++func (job *warmupJob) run(fuzzer *Fuzzer){
++	job.fuzzer = fuzzer
++	job.info.Logf("\n%s", job.p.Serialize())
++	job.info.Execs.Add(1)
++	var wg sync.WaitGroup
++	log.Logf(0, "For each selected system call, initiate hint and fault injection jobs.")
++	for call, _ := range job.calls{
++		wg.Add(1)
++		go func(){
++			job.warmingCall(call)
++			wg.Done()
++		}()
++	}
++	wg.Wait()
++}
++func (job *warmupJob) warmingCall(call int){
++	job.fuzzer.startJob(job.fuzzer.statJobsBoostSmash, &smashJob{
++		exec: job.fuzzer.smashQueue,
++		p:    job.p.Clone(),
++		call: call,
++		info: &JobInfo{
++			Name:  job.p.String(),
++			Type: "boostsmash",
++			Calls: []string{job.p.CallName(call)},
++			BlToWarmup: true,
++		},
++	})
++	if job.fuzzer.Config.Comparisons && call >= 0{
++		//log.Logf(0, "test, strat warmup hint")
++		job.fuzzer.startJob(job.fuzzer.statJobsBoostHints, &hintsJob{
++			exec: job.fuzzer.smashQueue,
++			p:    job.p.Clone(),
++			call: call,
++			info: &JobInfo{
++				Name:  job.p.String(),
++				Type:  "boosthints",
++				Calls: []string{job.p.CallName(call)},
++				BlToWarmup: true,
++			},
++		})
++	}
++	if job.fuzzer.Config.FaultInjection && call >= 0 {
++		//log.Logf(0, "test, start warmup hint")
++		job.fuzzer.startJob(job.fuzzer.statJobsBoostFaultInjection, &faultInjectionJob{
++			exec: job.fuzzer.smashQueue,
++			p:    job.p.Clone(),
++			call: call,
++			BlToWarmup: true,
++		})
++	}
++}
++
++func (job *warmupJob) getInfo() *JobInfo {
++	return job.info
++}
+diff --git a/pkg/fuzzer/queue/queue.go b/pkg/fuzzer/queue/queue.go
+index cbdb2ba19..85a51be65 100644
+--- a/pkg/fuzzer/queue/queue.go
++++ b/pkg/fuzzer/queue/queue.go
+@@ -56,6 +56,7 @@ type Request struct {
+ 	mu     sync.Mutex
+ 	result *Result
+ 	done   chan struct{}
++	IsWarmUp bool
+ }
+ 
+ type ExecutorID struct {
+diff --git a/pkg/fuzzer/stats.go b/pkg/fuzzer/stats.go
+index 7990f8b13..4a728df57 100644
+--- a/pkg/fuzzer/stats.go
++++ b/pkg/fuzzer/stats.go
+@@ -14,6 +14,10 @@ type Stats struct {
+ 	statJobsSmash           *stat.Val
+ 	statJobsFaultInjection  *stat.Val
+ 	statJobsHints           *stat.Val
++	statJobsBoostSmash           *stat.Val
++	statJobsBoostFaultInjection  *stat.Val
++	statJobsBoostHints           *stat.Val
++	statJobsWarmup          *stat.Val
+ 	statExecTime            *stat.Val
+ 	statExecGenerate        *stat.Val
+ 	statExecFuzz            *stat.Val
+@@ -25,6 +29,9 @@ type Stats struct {
+ 	statExecHint            *stat.Val
+ 	statExecSeed            *stat.Val
+ 	statExecCollide         *stat.Val
++	statExecWarmFaultInject     *stat.Val
++	statExecWarmHint            *stat.Val
++	statExecWarmSmash	*stat.Val
+ }
+ 
+ func newStats() Stats {
+@@ -40,9 +47,16 @@ func newStats() Stats {
+ 			stat.StackedGraph("jobs"), stat.Link("/jobs?type=triage")),
+ 		statJobsSmash: stat.New("smash jobs", "Running smash jobs", stat.StackedGraph("jobs"),
+ 			stat.Link("/jobs?type=smash")),
++		statJobsBoostSmash: stat.New("boost smash jobs", "Running boost smash jobs", stat.StackedGraph("jobs"),
++			stat.Link("/jobs?type=boostsmash")),
+ 		statJobsFaultInjection: stat.New("fault jobs", "Running fault injection jobs", stat.StackedGraph("jobs")),
++		statJobsBoostFaultInjection: stat.New("boost fault jobs", "Running boost fault injection jobs", stat.StackedGraph("jobs")),
+ 		statJobsHints: stat.New("hints jobs", "Running hints jobs", stat.StackedGraph("jobs"),
+ 			stat.Link("/jobs?type=hints")),
++		statJobsBoostHints: stat.New("boost hints jobs", "Running boost hints jobs", stat.StackedGraph("jobs"),
++			stat.Link("/jobs?type=boosthints")),
++		statJobsWarmup: stat.New("warmup jobs", "Running warmup jobs", stat.StackedGraph("jobs"),
++			stat.Link("/jobs?type=warmup")),
+ 		statExecTime: stat.New("prog exec time", "Test program execution time (ms)", stat.Distribution{}),
+ 		statExecGenerate: stat.New("exec gen", "Executions of generated programs", stat.Rate{},
+ 			stat.StackedGraph("exec")),
+@@ -64,5 +78,11 @@ func newStats() Stats {
+ 			stat.Rate{}, stat.StackedGraph("exec")),
+ 		statExecCollide: stat.New("exec collide", "Executions of programs in collide mode",
+ 			stat.Rate{}, stat.StackedGraph("exec")),
++		statExecWarmFaultInject: stat.New("exec inject(warmup)", "Executions of fault injection to warmup bbs",
++			stat.Rate{}, stat.StackedGraph("exec")),
++		statExecWarmHint: stat.New("exec hints(warmup)", "Executions of programs generated using hints to warmup bbs",
++			stat.Rate{}, stat.StackedGraph("exec")),
++		statExecWarmSmash: stat.New("exec smash(warmup)", "Executions of programs generated using smash to warmup bbs",
++			stat.Rate{}, stat.StackedGraph("exec")),
+ 	}
+ }
+diff --git a/pkg/manager/seeds.go b/pkg/manager/seeds.go
+index c0489ca2f..0861a3234 100644
+--- a/pkg/manager/seeds.go
++++ b/pkg/manager/seeds.go
+@@ -27,7 +27,7 @@ type Seeds struct {
+ 	Candidates []fuzzer.Candidate
+ }
+ 
+-func LoadSeeds(cfg *mgrconfig.Config, immutable bool) Seeds {
++func LoadSeeds(cfg *mgrconfig.Config, immutable bool, onlydb bool) Seeds {
+ 	var info Seeds
+ 	var err error
+ 	info.CorpusDB, err = db.Open(filepath.Join(cfg.Workdir, "corpus.db"), !immutable)
+@@ -70,20 +70,22 @@ func LoadSeeds(cfg *mgrconfig.Config, immutable bool) Seeds {
+ 				Data: rec.Val,
+ 			}
+ 		}
+-		seedDir := filepath.Join(cfg.Syzkaller, "sys", cfg.TargetOS, "test")
+-		if osutil.IsExist(seedDir) {
+-			seeds, err := os.ReadDir(seedDir)
+-			if err != nil {
+-				log.Fatalf("failed to read seeds dir: %v", err)
+-			}
+-			for _, seed := range seeds {
+-				data, err := os.ReadFile(filepath.Join(seedDir, seed.Name()))
++		if !onlydb{
++			seedDir := filepath.Join(cfg.Syzkaller, "sys", cfg.TargetOS, "test")
++			if osutil.IsExist(seedDir) {
++				seeds, err := os.ReadDir(seedDir)
+ 				if err != nil {
+-					log.Fatalf("failed to read seed %v: %v", seed.Name(), err)
++					log.Fatalf("failed to read seeds dir: %v", err)
+ 				}
+-				inputs <- &Input{
+-					IsSeed: true,
+-					Data:   data,
++				for _, seed := range seeds {
++					data, err := os.ReadFile(filepath.Join(seedDir, seed.Name()))
++					if err != nil {
++						log.Fatalf("failed to read seed %v: %v", seed.Name(), err)
++					}
++					inputs <- &Input{
++						IsSeed: true,
++						Data:   data,
++					}
+ 				}
+ 			}
+ 		}
+@@ -197,7 +199,7 @@ type FilteredCandidates struct {
+ }
+ 
+ func FilterCandidates(candidates []fuzzer.Candidate, syscalls map[*prog.Syscall]bool,
+-	dropMinimize bool) FilteredCandidates {
++dropMinimize bool) FilteredCandidates {
+ 	var ret FilteredCandidates
+ 	for _, item := range candidates {
+ 		if !item.Prog.OnlyContains(syscalls) {
+diff --git a/pkg/mgrconfig/config.go b/pkg/mgrconfig/config.go
+index f4857e613..53c441337 100644
+--- a/pkg/mgrconfig/config.go
++++ b/pkg/mgrconfig/config.go
+@@ -218,6 +218,9 @@ type Config struct {
+ 
+ 	// Implementation details beyond this point. Filled after parsing.
+ 	Derived `json:"-"`
++	WarmUp bool `json:"warm_up"`
++	BoostOnly bool `json:"boost_only"`
++	CoverNumBBNum string `json:"cover_bb_num"`
+ }
+ 
+ // These options are not guaranteed to be backward/forward compatible and
+diff --git a/pkg/mgrconfig/load.go b/pkg/mgrconfig/load.go
+index 76a0bcf14..31f9ae74c 100644
+--- a/pkg/mgrconfig/load.go
++++ b/pkg/mgrconfig/load.go
+@@ -98,6 +98,9 @@ func defaultValues() *Config {
+ 			CoverEdges:       true,
+ 			DescriptionsMode: manualDescriptions,
+ 		},
++		WarmUp: false,
++		BoostOnly: true,
++		CoverNumBBNum: "",
+ 	}
+ }
+ 
+diff --git a/pkg/rpcserver/rpcserver.go b/pkg/rpcserver/rpcserver.go
+index 5a104d81c..15218649a 100644
+--- a/pkg/rpcserver/rpcserver.go
++++ b/pkg/rpcserver/rpcserver.go
+@@ -80,6 +80,14 @@ type Server struct {
+ 	triagedCorpus  atomic.Bool
+ 	statVMRestarts *stat.Val
+ 	*runnerStats
++	// HitMapChan is used to receive pc hit number from runners
++	HitMapChan chan []uint64
++	// HitMap is used to store the canonical pc addrss and its cover times.
++	HitMap map[uint64]uint32
++	// HitMap_mu is used to ensure thread-safe access to the HitMap
++	HitMap_mu sync.Mutex
++	// chan done to end the goroutine of update HItMap
++	done chan struct{}
+ }
+ 
+ func New(cfg *mgrconfig.Config, mgr Manager, debug bool) (*Server, error) {
+@@ -155,6 +163,12 @@ func newImpl(ctx context.Context, cfg *Config, mgr Manager) (*Server, error) {
+ 			statNoExecRequests:     queue.StatNoExecRequests,
+ 			statNoExecDuration:     queue.StatNoExecDuration,
+ 		},
++		// make HitMapChan
++		HitMapChan: make(chan []uint64),
++		// make HitMap
++		HitMap:     make(map[uint64]uint32),
++		// make done
++		done:       make(chan struct{}),
+ 	}
+ 	s, err := flatrpc.ListenAndServe(cfg.RPC, serv.handleConn)
+ 	if err != nil {
+@@ -162,13 +176,36 @@ func newImpl(ctx context.Context, cfg *Config, mgr Manager) (*Server, error) {
+ 	}
+ 	serv.serv = s
+ 	serv.Port = s.Addr.Port
++	go func(){
++		for{
++			select{
++			case pcs := <- serv.HitMapChan:
++				serv.UpdateHitMap(pcs)
++			case <- serv.done:
++				return
++			}
++		}
++	}()
+ 	return serv, nil
+ }
+ 
+ func (serv *Server) Close() error {
++	close(serv.done)
+ 	return serv.serv.Close()
+ }
+ 
++func (serv *Server) UpdateHitMap(pcs []uint64){
++	serv.HitMap_mu.Lock()
++	defer serv.HitMap_mu.Unlock()
++	for _, pc := range pcs{
++		if _, exists := serv.HitMap[pc]; exists{
++			serv.HitMap[pc]++
++		}else{
++			serv.HitMap[pc] = 1
++		}
++	}
++}
++
+ func (serv *Server) handleConn(conn *flatrpc.Conn) {
+ 	connectReq, err := flatrpc.Recv[*flatrpc.ConnectRequestRaw](conn)
+ 	if err != nil {
+@@ -403,6 +440,8 @@ func (serv *Server) CreateInstance(id int, injectExec chan<- bool, updInfo dispa
+ 		procs:         serv.cfg.Procs,
+ 		updInfo:       updInfo,
+ 		resultCh:      make(chan error, 1),
++		// runners share the chan in serv
++		HitMapChan:    serv.HitMapChan,
+ 	}
+ 	serv.mu.Lock()
+ 	defer serv.mu.Unlock()
+diff --git a/pkg/rpcserver/runner.go b/pkg/rpcserver/runner.go
+index 6100c94f7..ff4fa7f39 100644
+--- a/pkg/rpcserver/runner.go
++++ b/pkg/rpcserver/runner.go
+@@ -50,6 +50,7 @@ type Runner struct {
+ 	conn        *flatrpc.Conn
+ 	stopped     bool
+ 	machineInfo []byte
++	HitMapChan    chan []uint64
+ }
+ 
+ type runnerStats struct {
+@@ -180,6 +181,9 @@ func (runner *Runner) ConnectionLoop() error {
+ 			if err := runner.sendRequest(req); err != nil {
+ 				return err
+ 			}
++			if req.IsWarmUp == true{
++				log.Logf(0, "Send a warmup seed successfully.")
++			}
+ 		}
+ 		if len(runner.requests) == 0 {
+ 			if !runner.Alive() {
+@@ -391,6 +395,11 @@ func (runner *Runner) handleExecResult(msg *flatrpc.ExecResult) error {
+ 		}
+ 		for _, call := range msg.Info.Calls {
+ 			runner.convertCallInfo(call)
++			// Send these call.Cover to the HitMapChan
++			go func(pcs []uint64){
++				//log.Logf(0, "This request have %d bb covered", len(pcs))
++				runner.HitMapChan <-pcs
++			}(call.Cover)
+ 		}
+ 		if len(msg.Info.ExtraRaw) != 0 {
+ 			msg.Info.Extra = msg.Info.ExtraRaw[0]
+@@ -402,6 +411,9 @@ func (runner *Runner) handleExecResult(msg *flatrpc.ExecResult) error {
+ 			}
+ 			msg.Info.ExtraRaw = nil
+ 			runner.convertCallInfo(msg.Info.Extra)
++			go func(pcs []uint64){
++				runner.HitMapChan <-pcs
++			}(msg.Info.Extra.Cover)
+ 		}
+ 	}
+ 	status := queue.Success
+diff --git a/syz-manager/http.go b/syz-manager/http.go
+index 2e5f703a9..efadab5fa 100644
+--- a/syz-manager/http.go
++++ b/syz-manager/http.go
+@@ -680,6 +680,9 @@ func (mgr *Manager) httpJobs(w http.ResponseWriter, r *http.Request) {
+ 	case "triage":
+ 	case "smash":
+ 	case "hints":
++	case "warmup":
++	case "boostsmash":
++	case "boosthints":
+ 	default:
+ 		http.Error(w, "unknown job type", http.StatusBadRequest)
+ 		return
+diff --git a/syz-manager/manager.go b/syz-manager/manager.go
+index db181d3a3..df483949f 100644
+--- a/syz-manager/manager.go
++++ b/syz-manager/manager.go
+@@ -20,6 +20,10 @@ import (
+ 	"sync"
+ 	"sync/atomic"
+ 	"time"
++	"math"
++	//"net/http"
++	_ "net/http/pprof"
++	//"runtime"
+ 
+ 	"github.com/google/syzkaller/dashboard/dashapi"
+ 	"github.com/google/syzkaller/pkg/asset"
+@@ -66,7 +70,8 @@ var (
+ 		"	This is useful mostly for benchmarking with testbed.\n"+
+ 		" - corpus-run: continuously run the corpus programs.\n"+
+ 		" - run-tests: run unit tests\n"+
+-		"	Run sys/os/test/* tests in various modes and print results.\n")
++		"	Run sys/os/test/* tests in various modes and print results.\n"+
++		" - corpusdb-run: only run the corpus.db programs and return nil after iteration is over.\n")
+ 
+ 	flagTests = flag.String("tests", "", "prefix to match test file names (for -mode run-tests)")
+ )
+@@ -135,6 +140,7 @@ const (
+ 	ModeCorpusTriage
+ 	ModeCorpusRun
+ 	ModeRunTests
++	ModeCorpusdbRun
+ )
+ 
+ const (
+@@ -186,6 +192,10 @@ func main() {
+ 		mode = ModeRunTests
+ 		cfg.DashboardClient = ""
+ 		cfg.HubClient = ""
++	case "corpusdb-run":
++		mode = ModeCorpusdbRun
++		cfg.HubClient = ""
++		cfg.DashboardClient = ""
+ 	default:
+ 		flag.PrintDefaults()
+ 		log.Fatalf("unknown mode: %v", *flagMode)
+@@ -239,7 +249,9 @@ func RunManager(mode Mode, cfg *mgrconfig.Config) {
+ 
+ 	mgr.initStats()
+ 	if mode == ModeFuzzing || mode == ModeCorpusTriage || mode == ModeCorpusRun {
+-		go mgr.preloadCorpus()
++		go mgr.preloadCorpus(false)
++	} else if mode == ModeCorpusdbRun {
++		go mgr.preloadCorpus(true)
+ 	} else {
+ 		close(mgr.corpusPreload)
+ 	}
+@@ -281,6 +293,10 @@ func RunManager(mode Mode, cfg *mgrconfig.Config) {
+ 	}
+ 
+ 	go mgr.heartbeatLoop()
++	if mgr.cfg.CoverNumBBNum != ""{
++		log.Logf(0, "Start HitMap Analyze, (default is closed)")
++		go mgr.HitMapLoop()
++	}
+ 	if mgr.mode != ModeSmokeTest {
+ 		osutil.HandleInterrupts(vm.Shutdown)
+ 	}
+@@ -299,6 +315,7 @@ func RunManager(mode Mode, cfg *mgrconfig.Config) {
+ 	mgr.pool.Loop(ctx)
+ }
+ 
++
+ // Exit successfully in special operation modes.
+ func (mgr *Manager) exit(reason string) {
+ 	log.Logf(0, "%v finished, shutting down...", reason)
+@@ -470,8 +487,14 @@ func (mgr *Manager) processRepro(res *manager.ReproResult) {
+ 	}
+ }
+ 
+-func (mgr *Manager) preloadCorpus() {
+-	info := manager.LoadSeeds(mgr.cfg, false)
++func (mgr *Manager) preloadCorpus(onlydb bool) {
++	var info manager.Seeds
++	if !onlydb {
++		info = manager.LoadSeeds(mgr.cfg, false, false)
++	} else {
++		log.Logf(0, "Only load data in the corpus.db")
++		info = manager.LoadSeeds(mgr.cfg, false, true)
++	}
+ 	mgr.fresh = info.Fresh
+ 	mgr.corpusDB = info.CorpusDB
+ 	mgr.corpusPreload <- info.Candidates
+@@ -491,8 +514,13 @@ func (mgr *Manager) loadCorpus() []fuzzer.Candidate {
+ 	sort.SliceStable(ret.Candidates, func(i, j int) bool {
+ 		return len(ret.Candidates[i].Prog.Calls) < len(ret.Candidates[j].Prog.Calls)
+ 	})
+-	reminimized := ret.ReminimizeSubset()
+-	resmashed := ret.ResmashSubset()
++	var reminimized int
++	//reminimized = ret.ReminimizeSubset()
++	reminimized = 0
++	var resmashed int
++	if mgr.cfg.WarmUp == false{
++		resmashed = ret.ResmashSubset()
++	}
+ 	log.Logf(0, "%-24v: %v (%v seeds), %d to be reminimized, %d to be resmashed",
+ 		"corpus", len(ret.Candidates), ret.SeedCount, reminimized, resmashed)
+ 	return ret.Candidates
+@@ -1119,6 +1147,11 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature, enabledSyscalls map
+ 	opts := mgr.defaultExecOpts()
+ 
+ 	if mgr.mode == ModeFuzzing {
++		var boostOnly bool
++		boostOnly = false
++		if mgr.cfg.WarmUp{
++			boostOnly = true
++		}
+ 		rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
+ 		fuzzerObj := fuzzer.NewFuzzer(context.Background(), &fuzzer.Config{
+ 			Corpus:         mgr.corpus,
+@@ -1130,6 +1163,7 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature, enabledSyscalls map
+ 			EnabledCalls:   enabledSyscalls,
+ 			NoMutateCalls:  mgr.cfg.NoMutateCalls,
+ 			FetchRawCover:  mgr.cfg.RawCover,
++			BoostOnly:      boostOnly,
+ 			Logf: func(level int, msg string, args ...interface{}) {
+ 				if level != 0 {
+ 					return
+@@ -1169,8 +1203,18 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature, enabledSyscalls map
+ 		ctx := &corpusRunner{
+ 			candidates: corpus,
+ 			rnd:        rand.New(rand.NewSource(time.Now().UnixNano())),
++			onlydb: false,
+ 		}
+ 		return queue.DefaultOpts(ctx, opts)
++	} else if mgr.mode == ModeCorpusdbRun {
++		ctx := &corpusRunner{
++			candidates: corpus,
++			rnd:        rand.New(rand.NewSource(time.Now().UnixNano())),
++			onlydb: true,
++		}
++		log.Logf(0, "corpusdb mode, need bb coverage.")
++		opts.ExecFlags |= flatrpc.ExecFlagCollectCover
++		return queue.DefaultOpts(ctx, opts)
+ 	} else if mgr.mode == ModeRunTests {
+ 		ctx := &runtest.Context{
+ 			Dir:      filepath.Join(mgr.cfg.Syzkaller, "sys", mgr.cfg.Target.OS, "test"),
+@@ -1202,6 +1246,7 @@ type corpusRunner struct {
+ 	mu         sync.Mutex
+ 	rnd        *rand.Rand
+ 	seq        int
++	onlydb     bool
+ }
+ 
+ func (cr *corpusRunner) Next() *queue.Request {
+@@ -1213,9 +1258,13 @@ func (cr *corpusRunner) Next() *queue.Request {
+ 		// First run all candidates sequentially.
+ 		p = cr.candidates[cr.seq].Prog
+ 		cr.seq++
+-	} else {
++		log.Logf(0, "There are %d programs left", len(cr.candidates) - cr.seq)
++	} else if !cr.onlydb {
+ 		// Then pick random progs.
+ 		p = cr.candidates[cr.rnd.Intn(len(cr.candidates))].Prog
++	} else {
++		log.Logf(0, "The iteration of  programs in the corpus.db is over, no more requests.")
++		return nil
+ 	}
+ 	return &queue.Request{
+ 		Prog:      p,
+@@ -1449,3 +1498,267 @@ func publicWebAddr(addr string) string {
+ 	}
+ 	return "http://" + addr
+ }
++
++func (mgr *Manager) HitMapLoop(){
++	ticker := time.NewTicker(1 * time.Minute)
++	defer ticker.Stop()
++	for{
++		select{
++		case <-ticker.C:
++			if len(mgr.serv.HitMap) != 0 && ((mgr.fuzzer.Load() != nil && mgr.fuzzer.Load().CandidateTriageFinished()) || mgr.mode == ModeCorpusdbRun){
++				log.Logf(0, "All Candidate&CanTriage jobs finished, Begin to analyze Hit Map.")
++				mgr.analyzeHitMap()
++			}else if mgr.fuzzer.Load() != nil {
++				log.Logf(0, "HitMap length is:%d", len(mgr.serv.HitMap))
++			}else{
++				log.Logf(0, "no fuzzer yet.")
++			}
++		}
++	}
++}
++
++func (mgr *Manager) analyzeHitMap(){
++	// Memory usage
++	/*go func() {
++		if err := http.ListenAndServe("localhost:6060", nil); err != nil{
++			log.Logf(0, "monitor start fauls!")
++		}
++	}()
++	*/
++	// Dump the pc hit map, deep copy the HitMap to pc_hit_map, because there is alot of analyzing work coming.
++	// Collect the BBs with the same number of cover times as group.
++	// Sort these groups by increasing the number of cover times.
++	// [hitnum : BB number : percentage of total covered BB number]
++	// Clustering groups into sets according to the percentage of basic blocks in the cluster to the total covered basic block. e.g., set1(0, 10%) is the set of all sorted groups with their total BBs account for less than 10% of the covered BBs.
++	pc_hit_map := make(map[uint64]uint32)
++	hit_pc_map := make(map[uint32][]uint64)
++	mgr.serv.HitMap_mu.Lock()
++	for pc, hit := range mgr.serv.HitMap{
++		pc_hit_map[pc] = hit
++		hit_pc_map[hit] = append(hit_pc_map[hit], pc)
++	}
++	log.Logf(0, "During analyze the hitmap, the signal coverage is = %v",mgr.corpus.Signal().Len())
++	mgr.serv.HitMap_mu.Unlock()
++
++	// Sort the cover times increasingly.
++	sorted_hit_inc := make([]uint32, 0, len(hit_pc_map))
++	for hit, _ := range hit_pc_map{
++		sorted_hit_inc = append(sorted_hit_inc, hit)
++	}
++	sort.Slice(sorted_hit_inc, func(i, j int) bool {return sorted_hit_inc[i] < sorted_hit_inc[j]})
++	// Currently the total number of covered BB is:
++	totalCoveredBBnum := len(pc_hit_map)
++	// Dump the number of cover times : number of related BBs : Percentage.
++	if mgr.cfg.CoverNumBBNum != "donotrecord"{
++		go mgr.MakeHitBBnumList(sorted_hit_inc, hit_pc_map, totalCoveredBBnum)
++		if mgr.cfg.WarmUp == false{
++			go mgr.MakeBBHitnum(sorted_hit_inc, len(sorted_hit_inc), hit_pc_map, nil)
++		}
++	}
++	if mgr.cfg.WarmUp{
++		//logMemoryUsage()
++		log.Logf(0, "Boost Mode On(default closed)")
++		if mgr.fuzzer.Load().BeginWarmUp == false{
++			mgr.fuzzer.Load().BeginWarmUp = true
++		}
++		// BBset :=  mgr.GetBBSet(sorted_hit_inc, hit_pc_map, number)
++		BBset, idx := mgr.GetBBSet(sorted_hit_inc, hit_pc_map, int(math.Round(0.05 * float64(totalCoveredBBnum))))
++		// Check DenyList and deny bbs in BBset or remove deny bb in the dnylist
++		DenyedBBNum := mgr.fuzzer.Load().WarmupInst.DenyCheck(BBset, pc_hit_map)
++		log.Logf(0, "Selected under covered BB number is :%d, denyed bb number is : %d", len(BBset), DenyedBBNum)
++		if len(BBset) != 0{
++			// Update warmup map to use as feed back.
++			log.Logf(0, "Update the undercovered BB set.")
++			mgr.fuzzer.Load().WarmupInst.Update(BBset)
++			if mgr.cfg.CoverNumBBNum != "donotrecord"{
++				go mgr.MakeBBHitnum(sorted_hit_inc, idx, hit_pc_map, BBset)
++			}
++		}
++		if mgr.fuzzer.Load().CandidateTriageFinished() && mgr.fuzzer.Load().BoostJobNum() == 0{
++			log.Logf(0, "No candidate&canTriage jobs and smashQueue is empty, selecting seeds.")
++			// Update the DenyList
++			mgr.fuzzer.Load().WarmupInst.UpdateDenyList(BBset, pc_hit_map)
++			SeedSet, totalSeedNum := mgr.GetSeedSet(BBset)
++			SeedSetNum := len(SeedSet)
++			// LoadSeed to the candidate
++			if SeedSetNum != 0{
++				log.Logf(0, "Find %d seeds, account for %v percentage in the corpus", SeedSetNum, fmt.Sprintf("%.2f%%", float64(SeedSetNum)/float64(totalSeedNum)))
++				mgr.LoadSeed(SeedSet)
++				if mgr.cfg.BoostOnly == false && mgr.fuzzer.Load().Config.BoostOnly == true{
++					mgr.fuzzer.Load().Config.BoostOnly=false
++				}
++			}
++		}else{
++			log.Logf(0, "All the candidate and triage job(deflake&minimize) finished:%v; BoostJob is empty:%v", mgr.fuzzer.Load().CandidateTriageFinished(), mgr.fuzzer.Load().BoostJobNum() == 0)
++		}
++	}
++}
++
++func (mgr *Manager) LoadSeed(SeedSet map[string][]uint64)bool{
++	var candidates []fuzzer.Candidate
++	seedFlags := fuzzer.ProgFromCorpus|fuzzer.ProgWarmUp|fuzzer.ProgMinimized
++	seedFlags &= ^fuzzer.ProgSmashed
++	for SeedSig, _ := range SeedSet{
++		item := mgr.corpus.Item(SeedSig)
++		if item == nil{
++			log.Logf(0, "Seed %v doesn't exists.", SeedSig)
++		}
++		candidates = append(candidates, fuzzer.Candidate{
++			Prog:  item.Prog,
++			Flags: seedFlags,
++		})
++	}
++	mgr.fuzzer.Load().AddCandidates(candidates)
++	return true
++}
++
++func (mgr *Manager) GetSeedSet(BBset map[uint64]bool) (map[string][]uint64, int){
++	SeedSet := make(map[string][]uint64)
++	items := mgr.corpus.Items()
++	for _, item := range items{
++		for _, pc := range item.Cover{
++			if ifuse, exists := BBset[pc]; exists && ifuse{
++				SeedSet[item.Sig] = append(SeedSet[item.Sig], pc)
++			}
++		}
++	}
++	return SeedSet, len(items)
++}
++
++func (mgr *Manager) GetBBSet(sorted_hit_inc []uint32, hit_pcs map[uint32][]uint64, number int) (map[uint64]bool, int){
++	BBset := make(map[uint64]bool)
++	var acc_bb_num int
++	var idx int
++	var hitnum uint32
++	for idx, hitnum = range sorted_hit_inc{
++		acc_bb_num += len(hit_pcs[hitnum])
++		if acc_bb_num > number{
++			break
++		}
++		for _, pc := range hit_pcs[hitnum]{
++			BBset[pc] = true
++		}
++	}
++	return BBset, idx
++}
++func (mgr *Manager) MakeBBHitnum(sorted_hit_inc []uint32, idx int, hit_pcs map[uint32][]uint64, BBset map[uint64]bool){
++	type BBHitnum struct{
++		Hit_number uint32 `json:"CoverNumber"`
++		Under_covered bool `json:"UnderCovered"`
++		Pc_list  []string `json:"BBAddressList"`
++	}
++	type Output struct {
++		SelectedBBs []BBHitnum     `json:"SelectedBBs"`
++		BBSet       []string       `json:"BBSet,omitempty"` // Include only if BBSet is non-nil
++	}
++	var selectedBBs []BBHitnum
++	//log.Logf(0, "Choose sorted_hit_inc: 0:%d", idx)
++	for hit_i, hitnum := range sorted_hit_inc{
++		pcList, exists := hit_pcs[hitnum]
++		if !exists{
++			log.Logf(0, "Check sorted_hit_inc map failed.")
++		}
++		hexPCList := make([]string, len(pcList))
++		
++		for i, pc := range pcList {
++			hexPCList[i] = fmt.Sprintf("0x%x", pc)
++		}
++		
++		bbs := BBHitnum{
++			Hit_number: hitnum,
++			Under_covered: hit_i < idx,
++			Pc_list: hexPCList,
++		}
++		//log.Logf(0, "Selected bb List: %v", pcList)
++		selectedBBs = append(selectedBBs, bbs)
++	}
++	output := Output{
++		SelectedBBs : selectedBBs,
++	}
++	if BBset != nil {
++		var bbSetHex []string
++		for pc, ifuse := range BBset {
++			if ifuse{
++				bbSetHex = append(bbSetHex, fmt.Sprintf("0x%x", pc))
++			}
++		}
++		output.BBSet = bbSetHex
++	}
++	//log.Logf(0, "Number of selected bb groups: %d", len(selectedBBs))
++	mgr.WriteToJson(output, true)
++}
++
++func (mgr *Manager) MakeHitBBnumList(sorted_hit_inc []uint32, hit_pcs map[uint32][]uint64, total_coverd_bbnum int){
++	// Construct the json head: 
++	type HitBBPer struct{
++		Hit_num uint32     `json:"CoverNumber"`
++		BB_num  int        `json:"BBNumber"`
++		Percentage float64 `json:"Percentage"`
++	}
++	type CoverageData struct{
++		TotalCoveredBB int `json:"TotalCoveredBBnumber"`
++		HitBBPerList []HitBBPer `HitBBPerList`
++	}
++	var hitBBPerList []HitBBPer
++	
++	for _, hitnum := range sorted_hit_inc{
++		if bbs, exists := hit_pcs[hitnum]; exists{
++			percentage := float64(len(bbs))/float64(total_coverd_bbnum)
++			data := HitBBPer{
++				Hit_num:    hitnum,
++				BB_num:     len( bbs),
++				Percentage: percentage,
++			}
++			hitBBPerList = append(hitBBPerList, data)
++		}
++	}
++	coveragedata := CoverageData{
++		TotalCoveredBB: total_coverd_bbnum,
++		HitBBPerList: hitBBPerList,
++
++	}
++	mgr.WriteToJson(coveragedata, false)
++}
++func (mgr *Manager)WriteToJson(data interface{}, isChosenBBs bool) error{
++	folderTimestamp := time.Now().Format("20060102_15")
++	fileTimestamp := time.Now().Format("1504")
++	foldername := mgr.cfg.CoverNumBBNum
++	dir := filepath.Join(foldername, folderTimestamp)
++	err := os.MkdirAll(dir, 0755)
++	if err != nil{
++		log.Logf(0, "Create folder failed")
++		return err
++	}
++	var fileName string
++	if isChosenBBs == false {
++		fileName = filepath.Join(dir, fmt.Sprintf("HitBBPerc_%s.json",fileTimestamp))
++	} else {
++		fileName = filepath.Join(dir, fmt.Sprintf("UnderCoveredBBs_%s.json",fileTimestamp))
++		//log.Logf(0, "write data %v into the json", data)
++	}
++	file, err := os.Create(fileName)
++	if err != nil{
++		log.Logf(0, "Create file failed")
++		return err
++	}
++	defer file.Close()
++	encoder := json.NewEncoder(file)
++	encoder.SetIndent("", " ")
++	return encoder.Encode(data)
++
++}
++/*
++func logMemoryUsage() {
++	var memStats runtime.MemStats
++	runtime.ReadMemStats(&memStats)
++
++	// 输出内存使用日志
++	log.Logf(0, "Alloc = %v MiB", bToMb(memStats.Alloc))
++	log.Logf(0, "TotalAlloc = %v MiB", bToMb(memStats.TotalAlloc))
++	log.Logf(0, "Sys = %v MiB", bToMb(memStats.Sys))
++	log.Logf(0, "NumGC = %v\n", memStats.NumGC)
++}
++*/
++func bToMb(b uint64) uint64 {
++	return b / 1024 / 1024
++}
