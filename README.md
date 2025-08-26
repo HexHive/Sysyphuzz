@@ -13,5 +13,12 @@ In our paper, we first perform a fine-grained study of imbalanced code coverage 
 ## Repo Structure
 ```bash
 Sysyphuzz/
-|--
-```
+|--source_code
+|  |--9750182a9a67f35e95cb1e077a3b69a4a9b54083_0110.diff  # This git diff file contains the changes needed to modify Syzkaller (commit: 9750182) to Sysyphuzz.
+|  |--warmup_10_flag0107.go                               # This go file implements the essential components required to run Sysyphuzz.
+|  |--syzbot_config                                       # The config file using for compileing the Linux kernel. (version: Linux/x86_64 6.12.0-rc6)
+|  |--create-image.sh                                     # create-image.sh creates a minimal Debian Linux image suitable for syzkaller.
+|  |--ci-qemu-upstream-corpus.db                          # A Syzbot corpus captured on November 13, 2024.
+|  |--deploy.sh                                           # Run the deploy.sh script with sudo privileges. This script creates a new user fuzz and sets up the environment.
+
+
