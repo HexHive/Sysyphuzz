@@ -105,11 +105,6 @@ cover_bb_num = "donotrecord"
 
 💡 Note: Disabling hit count tracking can significantly reduce disk usage, which is useful when running on low-resource environments.
 
-Example:
-```bash
-warm_up = true                                 # Fuzzer running as SYSYPHUZZ.
-cover_bb_num = "./cover_bb_num_dir"            # All log files for hit count record will go into this folder.
-```
 Running in Syzkaller-Compatible Mode
 
 By setting:
