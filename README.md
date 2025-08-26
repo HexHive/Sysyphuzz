@@ -178,7 +178,7 @@ sudo bin/syz-manager \
 
 ## Artifact Evaluation
 
-### For Reviewers during the major revision
+### For Reviewers during the Major Revision
 	Follow the guidence in the source_code/scripts/atifact_valuation.pdf
 ### For Final Version
     🚧 Coming Soon:
