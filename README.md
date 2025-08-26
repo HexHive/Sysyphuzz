@@ -55,8 +55,9 @@ syzkaller.cfg – The baseline configuration used to run the vanilla Syzkaller f
 
 These files are pre-populated with default settings but can be further customized.
 
-### sysyphuzz.cfg
+### Running Sysyphuzz with sysyphuzz.cfg
 ```bash
+# sysyphuzz.cfg
 {
     "target": "linux/amd64",
     "http": "127.0.0.1:56743",
@@ -105,7 +106,7 @@ cover_bb_num = "donotrecord"
 
 💡 Note: Disabling hit count tracking can significantly reduce disk usage, which is useful when running on low-resource environments.
 
-Running in Syzkaller-Compatible Mode
+### Running in Syzkaller-Compatible Mode
 
 By setting:
 ```bash
@@ -130,3 +131,45 @@ This is useful for:
 cover_bb_num = "donotrecord"
 ```
 
+```bash
+#syzkaller.cfg
+{
+    "target": "linux/amd64",
+    "http": "127.0.0.1:56743",
+    "workdir": "/home/fuzz/code/sysyphuzz/workdir_syzk",
+    "kernel_src": "/home/fuzz/kernel/linux",
+    "kernel_obj": "/home/fuzz/kernel/linux-out",
+    "raw_cover": true,
+    "warm_up": false,
+    "boost_only": false,
+    "cover_bb_num" : "syzkaller_bb",
+    "reproduce": false,
+    "image": "/home/fuzz/Image/imag1/bullseye.img",
+    "sshkey": "/home/fuzz/Image/imag1/bullseye.id_rsa",
+    "syzkaller": "/home/fuzz/code/sysyphuzz",
+    "procs": 4,
+    "type": "qemu",
+    "vm": {
+        "count": 8,
+        "cpu": 2,
+        "mem": 4096,
+        "kernel": "/home/fuzz/kernel/linux-out/arch/x86/boot/bzImage"
+    }
+}
+```
+
+For other keywords in the config file, please check the documents in Syzkaller.
+[Configuration in Syzkaller](https://github.com/google/syzkaller/blob/master/docs/configuration.md)
+
+### Start Sysyphuzz
+```bash
+# Make sure you are the user "fuzz"
+# and in the sysyphuzz directory
+su fuzz
+cd ~/code/sysyphuzz/
+# Start Sysyphuzz
+sudo bin/syz-manager \
+-config sysyphuzz.cfg 2>&1 \
+| tee ./workdir_sysy/"$(date +"%Y_%m_%d").log"
+# Useing "ctrl + c" to stop.
+```
