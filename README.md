@@ -173,15 +173,19 @@ cd ~/code/sysyphuzz/
 sudo bin/syz-manager \
 -config sysyphuzz.cfg 2>&1 \
 | tee ./workdir_sysy/"$(date +"%Y_%m_%d").log"
-# Useing "ctrl + c" to stop.
+# Using "Ctrl + C" to stop.
 ```
 
 ## Artifact Evaluation
 
 ### For Reviewers during the Major Revision
-	Follow the guidence in the source_code/scripts/atifact_valuation.pdf
+	Follow the guidance in the source_code/scripts/atifact_valuation.pdf
+ 	```bash
+  	# If using the zendo zip file, run the command below after unzipping the file:
+   	find . -type f -exec dos2unix --keepdate {} +
+  	```
 ### For Final Version
     🚧 Coming Soon:
-	We are preparing automated scripts to further simplify deployment, execution, and evaluation of Sysyphuzz.
+	We are preparing automated scripts to further simplify the deployment, execution, and evaluation of Sysyphuzz.
 
 	Stay tuned!
