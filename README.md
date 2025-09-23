@@ -1,4 +1,4 @@
-# SYSYPHUZZ and the Pressure of More Coverage
+# SYSYPHUZZ: the Pressure of More Coverage
 
 ## Abstract
 Kernel fuzzing effectively uncovers vulnerabilities. While existing kernel fuzzers primarily focus on maximizing code coverage, coverage alone does not guarantee thorough exploration. Moreover, existing fuzzers, aimed at maximizing coverage, have plateaued. This pressing situation highlights the need for a new direction: code frequency-oriented kernel fuzzing. However, increasing the exploration of low-frequency kernel code faces two key challenges: (1) Resource constraints make it hard to schedule sufficient tasks for low-frequency regions without causing task explosion. (2) Random mutations often break context dependencies of syscalls targeting low-frequency regions, reducing the effectiveness of fuzzing.
@@ -27,11 +27,11 @@ Sysyphuzz/
 
 ## How To Build SYSYPHUZZ
 
-SYSYPHUZZ is based on Syzkaller, SYSYPHUZZ does not require additional dependencies.
+SYSYPHUZZ is based on Syzkaller; SYSYPHUZZ does not require additional dependencies.
 ### Clone this Repo
 ### Build 
 Run the deploy.sh script with sudo privileges.
-This script creates a new user fuzz and sets up the environment. 
+This script creates a new user "fuzz" and sets up the environment. 
 You can modify the default password in the shell file if needed. 
 
 Once executed, Sysyphuzz is ready for use.
@@ -88,7 +88,7 @@ In addition to the standard Syzkaller configuration options, Sysyphuzz introduce
 |Keyword | Type | Description|
 |---|---|---|
 |warm_up | bool | Enables the warm-up stage to prioritize under-covered basic blocks (BBs).
-|boost_only	| bool | Runs only the boosting phase, skipping all coverage feedback, this is a expert mode used for subsequent development, keep false here.
+|boost_only	| bool | Runs only the boosting phase, skipping all coverage feedback. This is an expert mode used for subsequent development; keep false here.
 |cover_bb_num | string | Path to the directory tracking the number of times each BB has been covered.
 
 All other configuration fields remain compatible with Syzkaller, making migration or extension straightforward.
@@ -181,7 +181,7 @@ sudo bin/syz-manager \
 ### For Reviewers during the Major Revision
 	Follow the guidance in the source_code/scripts/atifact_valuation.pdf
  	```bash
-  	# If using the zendo zip file, run the command below after unzipping the file:
+  	# We thank the AE reviewer here. If using the zendo zip file, run the command below after unzipping the file:
    	find . -type f -exec dos2unix --keepdate {} +
   	```
 ### For Final Version
