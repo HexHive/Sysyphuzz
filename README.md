@@ -181,7 +181,7 @@ sudo bin/syz-manager \
 ## Artifact Evaluation
 
 ### For Reviewers during the Major Revision
-![Availabe & Functional & Reproduced](https://github.com/HexHive/Sysyphuzz/blob/main/badge-AFR.pdf)
+![Availabe & Functional & Reproduced](https://github.com/HexHive/Sysyphuzz/blob/main/badge-AFR-1.png)
 	Follow the guidance in the source_code/scripts/atifact_valuation.pdf
  	```bash
   	# We thank the AE reviewer here. If using the zendo zip file, run the command below after unzipping the file:
