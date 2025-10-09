@@ -7,9 +7,12 @@ In our paper, we first perform a fine-grained study of imbalanced code coverage 
 
 ## Citation
 ```bash
-SYSYPHUZZ: the Pressure of More Coverage
-Zhezhong Ren, Han Zheng, Zhiyao Feng, and Qinying Wang, Marcel Busch, Yuqing Zhang, Chao Zhang, Mathias Payer
-In 33nd Annual Network and Distributed System Security Symposium, NDSS, 2026
+@inproceedings{ren2026sysyphuzz,
+  title={SYSYPHUZZ: the Pressure of More Coverage},
+  author={Ren, Zhezhong and Zheng, Han and Feng, Zhiyao and Wang, Qinying and Busch, Marcel and Zhang, Yuqing and Zhang, Chao and Payer, Mathias},
+  booktitle={Proceedings of the Network and Distributed System Security Symposium (NDSS)},
+  year={2026}
+}
 ```
 
 ## Repo Structure
