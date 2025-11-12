@@ -9,7 +9,7 @@ In our paper, we first perform a fine-grained study of imbalanced code coverage 
 ```bash
 @inproceedings{ren2026sysyphuzz,
   title={SYSYPHUZZ: the Pressure of More Coverage},
-  author={Ren, Zhezhong and Zheng, Han and Feng, Zhiyao and Wang, Qinying and Busch, Marcel and Zhang, Yuqing and Zhang, Chao and Payer, Mathias},
+  author={Ren, Zezhong and Zheng, Han and Feng, Zhiyao and Wang, Qinying and Busch, Marcel and Zhang, Yuqing and Zhang, Chao and Payer, Mathias},
   booktitle={Proceedings of the Network and Distributed System Security Symposium (NDSS)},
   year={2026}
 }
